@@ -3,7 +3,7 @@ description: Allowing users to cancel I/O requests that are slow or blocked can 
 ms.assetid: adfe6d05-f30b-40a1-b3b0-58e2593e7b25
 title: Canceling Pending I/O Operations
 ms.topic: concept-article
-ms.date: 05/31/2018
+ms.date: 08/02/2026
 ---
 
 # Canceling Pending I/O Operations
@@ -14,6 +14,26 @@ Windows Vista extends the cancellation capabilities and includes support for ca
 
 >[!NOTE]
 >Calling the [CancelIoEx](cancelioex-func.md) function does not guarantee that an I/O operation will be canceled; the driver which is handling the operation must support cancellation and the operation must be in a state that can be canceled.
+
+## Canceling Write Operations
+
+**Pending** describes the completion state of an I/O request as a whole. It does not mean that the request has produced no effects. A write can transfer some of its data while the request is still pending, and cancellation does not roll back effects already produced.
+
+The completion status and byte count for a partially completed write are defined by the I/O target and its driver or protocol. Depending on the implementation and the outcome of the cancellation race, the write can complete normally, complete as canceled with a nonzero byte count, or complete as canceled with a zero byte count even though data was transferred. Therefore, **ERROR_OPERATION_ABORTED** and a reported byte count of zero do not prove that no data was transferred. Retrying the complete buffer based only on that result can duplicate data.
+
+The following non-exhaustive table shows representative behavior that applications must account for. The entries describe outcomes that can occur, not guarantees for every driver, Windows version, or cancellation race.
+
+| I/O target or stack | Possible progress | Completion information | Subsequent I/O |
+| --- | --- | --- | --- |
+| Local byte-stream named pipe | A prefix can already be available to or consumed by the peer. | The write can complete with **ERROR_OPERATION_ABORTED** and report zero bytes after that progress. | Cancellation does not necessarily disconnect the pipe. After the request completes, the pipe can remain usable, but the application must account for a possibly transferred prefix before retrying. |
+| TCP stream ([**WSASend**](/windows/win32/api/winsock2/nf-winsock2-wsasend)) | A prefix can already have reached the peer. TCP does not preserve write boundaries. | If cancellation wins after the send has made progress, the send can complete with **WSA_OPERATION_ABORTED** without a usable partial byte count. An I/O completion packet can report zero bytes even after that progress. | The TCP connection can be aborted even though the socket handle remains open. Continued use of a socket after canceling an outstanding overlapped operation is [undefined](/windows/win32/winsock/overlapped-i-o-and-event-objects-2); call [**closesocket**](/windows/win32/api/winsock/nf-winsock-closesocket). |
+| Windows legacy serial driver (**Serial.sys**) | A prefix can already have been handed to the UART; some or all of it might have been transmitted. | A canceled write can complete with **ERROR_OPERATION_ABORTED** and report zero bytes. | Cancellation does not close the port, but the application protocol might need to resynchronize before retrying. |
+| [SerCx2-managed serial port](/windows-hardware/drivers/serports/sercx2-handling-of-read-and-write-requests) | One or more bytes can have been transferred. | If cancellation occurs after progress, SerCx2 completes the request successfully with a short byte count. Some system-DMA hardware can provide only an approximate count. | If the count is exact and the device protocol permits it, the caller can issue another request for the reported remainder; otherwise, the caller must resynchronize. |
+| [USB bulk or interrupt transfer](/windows-hardware/drivers/ddi/usb/ns-usb-_urb_bulk_or_interrupt_transfer) | A transfer can make partial progress. | On return, the URB contains a transfer length. A client driver can [complete a request with both a status and request information](/windows-hardware/drivers/ddi/wdfrequest/nf-wdfrequest-wdfrequestcompletewithinformation); whether a partial count reaches an application on cancellation depends on the client driver and completion API. | Follow the client-driver contract before retrying the write or reusing the pipe. |
+
+A reported write count describes progress at the layer that reports it. It does not, in general, establish how many bytes a peer application processed or whether data reached durable storage.
+
+Use the completion API appropriate to the operation. If [**GetQueuedCompletionStatus**](/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus) returns zero with a non-**NULL** [**OVERLAPPED**](/windows/win32/api/minwinbase/ns-minwinbase-overlapped) pointer, it dequeued a completion packet for a failed operation and the output parameters contain the information stored for that operation. This exposes only the byte count supplied by the I/O stack. Do not use **OVERLAPPED.InternalHigh** as an alternative source of cancellation progress; its documented byte-count meaning applies to requests completed without errors, and its behavior is reserved and can change.
 
 ## Cancellation Considerations
 
